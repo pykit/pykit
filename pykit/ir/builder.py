@@ -49,13 +49,18 @@ class OpBuilder(_generated.GeneratedBuilder):
         return super(OpBuilder, self).alloca(type, **kwds)
 
     def load(self, value0, **kwds):
+        # TODO: Write a builder that produces untyped code !
         type = value0.type
-        assert type.is_pointer
-        return super(OpBuilder, self).load(type.base, value0, **kwds)
+        if type.is_opaque:
+            base = type
+        else:
+            assert type.is_pointer, type
+            base = type.base
+        return super(OpBuilder, self).load(base, value0, **kwds)
 
     def store(self, val, var, **kwds):
         assert var.type.is_pointer
-        assert val.type == var.type.base, (val.type, var.type)
+        assert val.type == var.type.base, (val.type, var.type, val, var)
         return super(OpBuilder, self).store(val, var, **kwds)
 
     def call(self, type, func, args, **kwds):

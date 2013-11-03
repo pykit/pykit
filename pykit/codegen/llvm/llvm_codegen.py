@@ -8,7 +8,7 @@ from __future__ import print_function, division, absolute_import
 
 from functools import partial
 
-from pykit import error
+from pykit import error, types
 from pykit import ir
 from pykit.ir import vvisit, ArgLoader, verify_lowlevel
 from pykit.ir import defs, opgrouper
@@ -159,6 +159,10 @@ def sizeof(builder, ty, intp):
     offset = builder.gep(null, [Constant.int(Type.int(), 1)])
     return builder.ptrtoint(offset, intp)
 
+def gep(builder, struct_type, p, attr):
+    index = struct_type.names.index(attr)
+    return builder.gep(p, [const_i32(0), const_i32(index)])
+
 #===------------------------------------------------------------------===
 # Translator
 #===------------------------------------------------------------------===
@@ -254,6 +258,24 @@ class Translator(object):
         lfunc = self.lmod.get_or_insert_function(
             lfunc_type, 'pykit.math.%s.%s' % (map(str, argtypes), name.lower()))
         return self.builder.call(lfunc, args, op.result)
+
+    # __________________________________________________________________
+
+    def op_getfield(self, op, p, attr):
+        struct_type = op.args[0].type.base
+        result = gep(self.builder, struct_type, p, attr)
+        lty = llvm_type(op.type)
+        if result.type == lty:
+            return result
+        return self.builder.load(result)
+
+    def op_setfield(self, op, p, attr, value):
+        struct_type = op.args[0].type.base
+        p = gep(self.builder, struct_type, p, attr)
+        lty = value.type
+        if not (lc.Type.pointer(lty) == p.type):
+            value = self.builder.load(value)
+        self.builder.store(value, p)
 
     # __________________________________________________________________
 
@@ -416,9 +438,17 @@ class LLVMArgLoader(ArgLoader):
     def load_Pointer(self, arg):
         return const_i64(arg.base).inttoptr(llvm_type(arg.type))
 
+    def load_Struct(self, arg):
+        return make_constant(arg, arg.type)
+
     def load_Undef(self, arg):
         return lc.Constant.undef(llvm_type(arg.type))
 
+
+def unwrap(c):
+    if isinstance(c, ir.Const):
+        return c.const
+    return c
 
 def make_constant(value, ty):
     lty = llvm_type(ty)
@@ -441,7 +471,7 @@ def make_constant(value, ty):
     elif type(ty) == Boolean:
         return lc.Constant.int(lty, value)
     elif type(ty) == Struct:
-        return lc.Constant.struct([make_constant(c.const, c.type)
+        return lc.Constant.struct([make_constant(unwrap(c), c.type)
                                        for c in value.values])
     else:
         raise NotImplementedError("Constants for", type(ty))
