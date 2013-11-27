@@ -20,14 +20,14 @@ import numpy as np
 
 from pykit import types
 from pykit.ir import Function, Block, GlobalValue, Const, combine, ArgLoader
-from pykit.ir import ops, linearize, defs
+from pykit.ir import ops, linearize, defs, tracing
 from pykit.utils import ValueDict
 
 #===------------------------------------------------------------------===
 # Interpreter
 #===------------------------------------------------------------------===
 
-Undef = object()                        # Undefined/uninitialized value
+Undef = "Undef"                         # Undefined/uninitialized value
 State = namedtuple('State', ['refs'])   # State shared by stack frames
 
 class Reference(object):
@@ -156,10 +156,6 @@ class Interp(object):
     def function(self, funcname):
         return self.func.module.get_function(funcname)
 
-    def partial(self, function, *args):
-        if isinstance(function, Function):
-            return lambda *more: self.call(function, *(args + more))
-
     def call(self, func, args):
         if isinstance(func, Function):
             # We're calling another known pykit function,
@@ -175,49 +171,18 @@ class Interp(object):
     def call_math(self, fname, *args):
         return defs.math_funcs[fname](*args)
 
-    def call_external(self):
-        pass
-
-    def call_virtual(self):
-        pass
-
     # __________________________________________________________________
     # Attributes
 
-    getfield = getattr
-    setfield = setattr
+    def getfield(self, obj, attr):
+        if obj['value'] is Undef:
+            return Undef
+        return obj['value'][attr] # structs are dicts
 
-    # __________________________________________________________________
-    # Index
-
-    getindex = operator.getitem
-    setindex = operator.setitem
-    getslice = operator.getitem
-    setslice = operator.setitem
-    slice = slice
-
-    # __________________________________________________________________
-    # Arrays
-
-    allpairs = product # hmm
-
-    def map(self, f, args, axes):
-        assert not axes # TODO
-        u = np.vectorize(f)
-        return u(*args)
-
-    def reduce(self, f, arg, axes):
-        assert not axes # TODO
-        if isinstance(arg, np.ndarray):
-            arg = arg.flatten()
-        return reduce(f, arg)
-
-    def scan(self, f, arg, axes):
-        assert not axes # TODO
-        result = arg.copy().flatten()
-        for i, x in enumerate(arg.flatten()[1:]):
-            result[i+1] = f(result[i], result[i+1])
-        return result
+    def setfield(self, obj, attr, value):
+        if obj['value'] is Undef:
+            obj['value'] = {}
+        obj['value'][attr] = value
 
     # __________________________________________________________________
 
@@ -242,31 +207,6 @@ class Interp(object):
     def func_from_addr(self, ptr):
         type = self.op.type
         return ctypes.cast(ptr, types.to_ctypes(type))
-
-    # __________________________________________________________________
-    # iterators
-
-    getiter = iter
-
-    def next(self, it):
-        try:
-            return next(it)
-        except Exception as e:
-            self.exc_throw(e)
-
-    # __________________________________________________________________
-    # Primitives
-
-    max = max
-    min = min
-
-    # __________________________________________________________________
-    # Constructors
-
-    new_list    = list
-    new_tuple   = tuple
-    new_set     = set
-    new_dict    = lambda self, keys, values: dict(zip(keys, values))
 
     # __________________________________________________________________
     # Control flow
@@ -480,12 +420,18 @@ class InterpArgLoader(ArgLoader):
     def load_Undef(self, arg):
         return Undef
 
-
-def run(func, env=None, exc_model=None, _state=None, args=()):
+def run(func, env=None, exc_model=None, _state=None, args=(),
+        tracer=tracing.DummyTracer()):
     """
     Interpret function. Raises UncaughtException(exc) for uncaught exceptions
     """
     assert len(func.args) == len(args)
+
+    tracer.push(tracing.Call(func, args))
+
+    # -------------------------------------------------
+    # Set up interpreter
+
 
     valuemap = dict(zip(func.argnames, args)) # { '%0' : pyval }
     argloader = InterpArgLoader(valuemap)
@@ -496,28 +442,53 @@ def run(func, env=None, exc_model=None, _state=None, args=()):
     else:
         handlers = {}
 
+    # -------------------------------------------------
+    # Eval loop
+
     curblock = None
     while True:
+        # -------------------------------------------------
+        # Block transitioning
+
         op = interp.op
         if op.block != curblock:
             interp.blockswitch(curblock, op.block)
             curblock = op.block
+
+        # -------------------------------------------------
+        # Find handler
 
         if op.opcode in handlers:
             fn = partial(handlers[op.opcode], interp)
         else:
             fn = getattr(interp, op.opcode)
 
+        # -------------------------------------------------
+        # Load arguments
+
         args = argloader.load_args(op)
 
+        # -------------------------------------------------
         # Execute...
+
+        tracer.push(tracing.Op(op, args))
+
         oldpc = interp.pc
-        result = fn(*args)
+        try:
+            result = fn(*args)
+        except UncaughtException, e:
+            tracer.push(tracing.Exc(e))
+            raise
         valuemap[op.result] = result
 
+        tracer.push(tracing.Res(op, args, result))
+
+        # -------------------------------------------------
         # Advance PC
+
         if oldpc == interp.pc:
             interp.incr_pc()
         elif interp.pc == -1:
             # Returning...
+            tracer.push(tracing.Ret(result))
             return result

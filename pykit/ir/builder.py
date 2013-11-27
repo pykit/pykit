@@ -136,8 +136,21 @@ class Builder(OpBuilder):
         elif self._lastop in ('head', 'tail'):
             self._curblock.append(op)
         else:
-            op.insert_after(self._lastop)
+            lastop = self._lastop
+            if ops.is_leader(lastop.opcode) and not ops.is_leader(op.opcode):
+                self.insert_after_last_leader(lastop.block, op)
+            else:
+                op.insert_after(lastop)
+
         self._lastop = op
+
+    def insert_after_last_leader(self, block, op):
+        for firstop in block.ops:
+            if not ops.is_leader(firstop.opcode):
+                op.insert_before(firstop)
+                return
+
+        block.append(op)
 
     def _insert_op(self, op):
         if self._curblock:
