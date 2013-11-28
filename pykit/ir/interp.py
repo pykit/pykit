@@ -64,7 +64,7 @@ class Interp(object):
         refs:           { id(obj) : Reference }
     """
 
-    def __init__(self, func, env, exc_model, argloader, state):
+    def __init__(self, func, env, exc_model, argloader, tracer):
         self.func = func
         self.env = env
         self.exc_model = exc_model
@@ -73,6 +73,7 @@ class Interp(object):
         self.state = {
             'env':       env,
             'exc_model': exc_model,
+            'tracer':    tracer,
         }
 
         self.ops, self.blockstarts = linearize(func)
@@ -81,8 +82,6 @@ class Interp(object):
         self.prevblock = None
         self.exc_handlers = None
         self.exception = None
-
-        self.refs = state.refs
 
     # __________________________________________________________________
     # Utils
@@ -120,14 +119,6 @@ class Interp(object):
     def convert(self, arg):
         return types.convert(arg, self.op.type)
 
-    def check_overflow(self, value):
-        assert self.op.type.is_int
-        bits = self.op.type.bits / 2
-        lower = 2 ** -bits
-        upper = 2 ** bits - 1
-        if not lower <= value <= upper:
-            raise OverflowError(value, self.op, lower, upper)
-
     # __________________________________________________________________
     # Var
 
@@ -139,6 +130,8 @@ class Interp(object):
         return var['value']
 
     def store(self, value, var):
+        if isinstance(value, dict) and set(value) == set(['type', 'value']):
+            value = value['value']
         var['value'] = value
 
     def phi(self):
@@ -265,8 +258,11 @@ class Interp(object):
 
         for block in self.exc_handlers:
             for leader in block.leaders:
-                if (leader.opcode == ops.exc_catch and
-                        self._exc_match(leader.args)):
+                if leader.opcode != ops.exc_catch:
+                    continue
+
+                args = [arg.const for arg in leader.args[0]]
+                if self._exc_match(args):
                     return leader
 
     # __________________________________________________________________
@@ -278,87 +274,6 @@ class Interp(object):
     def yieldval(self, op):
         pass # TODO:
 
-    # __________________________________________________________________
-    # Closures
-
-    def make_cell(self):
-        return { 'cell': Undef }
-
-    def load_cell(self, cell):
-        assert cell['cell'] is not Undef
-        return cell['cell']
-
-    def store_cell(self, cell, value):
-        cell['cell'] = value
-
-    def make_frame(self, parent, names):
-        values = dict((name, Undef) for name in names)
-        values['_parent_frame'] = parent
-        return ValueDict(values)
-
-    # __________________________________________________________________
-    # Threads
-
-    thread_start      = noop
-    thread_join       = noop
-    threadpool_start  = noop
-    threadpool_submit = noop
-    threadpool_join   = noop
-    threadpool_close  = noop
-
-    def load_vtable(self, op):
-        pass
-
-    def vtable_lookup(self, op):
-        pass
-
-    # __________________________________________________________________
-    # GC/Refcounting
-
-    def _checkref(self, obj):
-        assert id(obj) in self.refs
-        ref = self.refs[id(obj)]
-        assert ref.obj is obj
-        assert ref.refcount >= 1
-
-    def gc_incref(self, obj):
-        self._checkref(obj)
-        ref = self.refs[id(obj)]
-        ref.refcount += 1
-
-    def gc_decref(self, obj):
-        self._checkref(obj)
-        ref = self.refs[id(obj)]
-        ref.refcount -= 1
-        if ref.refcount == 0:
-            del self.refs[id(obj)]
-
-    def gc_gotref(self, obj):
-        assert id(obj) not in self.refs
-        self.refs[id(obj)] = 1
-
-    def gc_giveref(self, obj):
-        self._checkref(obj)
-
-    def gc_alloc(self, n):
-        result = np.empty(n, dtype=np.object)
-        result[...] = Undef
-        return result
-
-    def gc_dealloc(self, value):
-        value[...] = Undef
-
-    def gc_collect(self, op):
-        pass
-
-    def gc_read_barrier(self, op):
-        pass
-
-    def gc_traverse(self, op):
-        pass
-
-    def gc_write_barrier(self, op):
-        pass
 
 # Set unary, binary and compare operators
 for opname, evaluator in chain(defs.unary.items(), defs.binary.items(),
@@ -401,16 +316,6 @@ class ExceptionModel(object):
 # Run
 #===------------------------------------------------------------------===
 
-def _init_state(func, args):
-    """Initialize refcount state"""
-    refcounts = {}
-    return State(refcounts) # todo
-    for param, arg in zip(func.args, args):
-        if param.type.managed:
-            refcounts[id(arg)] = Reference(obj=arg, refcount=1, producer=param)
-
-    return State(refcounts)
-
 class InterpArgLoader(ArgLoader):
 
     def load_GlobalValue(self, arg):
@@ -436,7 +341,7 @@ def run(func, env=None, exc_model=None, _state=None, args=(),
     valuemap = dict(zip(func.argnames, args)) # { '%0' : pyval }
     argloader = InterpArgLoader(valuemap)
     interp = Interp(func, env, exc_model or ExceptionModel(),
-                    argloader, state=_state or _init_state(func, args))
+                    argloader, tracer)
     if env:
         handlers = env.get("interp.handlers") or {}
     else:

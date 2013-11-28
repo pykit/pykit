@@ -46,9 +46,15 @@ class Tracer(object):
         """
         self.stmts = []
         self.record = record
+        self.beginning = True
 
         self.callstack = [] # stack of function calls
         self.indent = 0     # indentation level
+
+    @property
+    def func(self):
+        """Currently executing function"""
+        return self.callstack[-1]
 
     def push(self, item):
         """
@@ -63,9 +69,10 @@ class Tracer(object):
         Display a single trace item.
         """
         if isinstance(item, Call):
-            self.emit(" --------> Calling function %s(%s)" % (
-                                    item.func.name, _format_args(item.args)))
             self.call(item.func)
+            self.emit("\n")
+            self.emit(" --------> %s(%s)" % (item.func.name,
+                                             _format_args(item.args)))
         elif isinstance(item, Op):
             opcode = item.op.opcode
             args = "(%s)" % _format_args(item.args)
@@ -78,16 +85,21 @@ class Tracer(object):
             else:
                 self.emit("")
         elif isinstance(item, Ret):
-            self.emit(" <-------- returning %s from %s" % (
-                                        _format_arg(item.result),
-                                        self.callstack[-1].name))
+            self.emit(" <---- (%s) ---- %s" % (_format_arg(item.result),
+                                               self.callstack[-1].name))
             self.ret()
         elif isinstance(item, Exc):
+            self.emit("\n")
             self.emit(" <-------- propagating %s from %s" % (item.exc,
-                                                             self.func))
+                                                             self.func.name))
             self.ret()
 
     def emit(self, s, end="\n"):
+        if self.beginning:
+            parts = self.func.name.split(".")[-2:]
+            name = ".".join(parts)
+            print("%-20s: " % name, end="")
+        self.beginning = (end == "\n")
         print(" " * self.indent + s, end=end)
 
     def call(self, func):
