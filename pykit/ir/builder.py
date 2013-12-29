@@ -9,7 +9,7 @@ from contextlib import contextmanager
 
 from pykit import error
 from pykit import types
-from pykit.ir import Value, Const, Undef, ops, findop, FuncArg, blocks
+from pykit.ir import Op, Value, Const, Undef, ops, findop, FuncArg, blocks
 from . import _generated
 
 #===------------------------------------------------------------------===
@@ -43,10 +43,10 @@ class OpBuilder(_generated.GeneratedBuilder):
     Build Operations, improving upon the generated methods.
     """
 
-    def alloca(self, type,  **kwds):
+    def alloca(self, type, numItems=None, **kwds):
         assert type is not None
-        assert type.is_pointer
-        return super(OpBuilder, self).alloca(type, **kwds)
+        assert numItems is None or numItems.is_integral
+        return super(OpBuilder, self).alloca(type, numItems, **kwds)
 
     def load(self, value0, **kwds):
         # TODO: Write a builder that produces untyped code !
@@ -60,8 +60,7 @@ class OpBuilder(_generated.GeneratedBuilder):
 
     def store(self, val, var, **kwds):
         assert var.type.is_pointer
-        assert val.type == var.type.base or var.type.base.is_opaque, (
-            val.type, var.type, val, var)
+        assert val.type == var.type.base or var.type.base.is_opaque, (val.type, var.type, val, var)
         return super(OpBuilder, self).store(val, var, **kwds)
 
     def call(self, type, func, args, **kwds):
@@ -84,6 +83,62 @@ class OpBuilder(_generated.GeneratedBuilder):
     def ptr_isnull(self, ptr, **kwds):
         assert ptr.type.is_pointer
         return super(OpBuilder, self).ptr_isnull(types.Bool, ptr, **kwds)
+
+    def unpackvector(self, vec, **kwds):
+        assert vec.type.is_vector
+        assert vec.type.base.is_integral or vec.type.base.is_real
+        return super(OpBuilder, self).bitcast(types.Array(vec.type.base, vec.type.count), vec, **kwds)
+
+    def packvector(self, arr, **kwds):
+        assert arr.type.is_array
+        assert arr.type.base.is_integral or arr.type.base.is_real
+        return super(OpBuilder, self).bitcast(types.Vector(arr.type.base, arr.type.count), arr, **kwds)
+
+    # determines the type of an aggregate member
+    @staticmethod
+    def __findtype(t, indices):
+        assert isinstance(indices, list)
+        assert len(indices) > 0
+        for idx in indices:
+            assert isinstance(idx, Const)
+            assert idx.type.is_integral
+            if t.is_array:
+                t = t.base
+            elif t.is_struct:
+                t = t.types[idx.const]
+            else:
+                assert False
+        return t
+
+    def insertvalue(self, agg, elt, indices, **kwds):
+        assert isinstance(indices, list)
+        assert len(indices) > 0
+        self.__findtype(agg.type, indices)
+        return super(OpBuilder, self).insertvalue(agg.type, agg, elt, indices, **kwds)
+
+    def extractvalue(self, agg, indices, **kwds):
+        assert isinstance(indices, list)
+        assert len(indices) > 0
+        returnType = self.__findtype(agg.type, indices)
+        return super(OpBuilder, self).extractvalue(returnType, agg, indices, **kwds)
+
+    def insertelement(self, vec, elt, idx, **kwds):
+        assert vec.type.is_vector
+        assert elt.type == vec.type.base
+        assert idx.type.is_integral
+        return super(OpBuilder, self).insertelement(vec.type, vec, elt, idx, **kwds)
+
+    def extractelement(self, vec, idx, **kwds):
+        assert vec.type.is_vector
+        assert idx.type.is_integral
+        return super(OpBuilder, self).extractelement(vec.type.base, vec, idx, **kwds)
+
+    def gep(self, ptr, indices, **kwds):
+        assert ptr.type.is_pointer
+        assert isinstance(indices, list)
+        assert len(indices) > 0
+        returnType = self.__findtype(ptr.type)
+        return super(OpBuilder, self).gep(types.Pointer(returnType), ptr, indices, **kwds)
 
     invert               = unary('invert')
     uadd                 = unary('uadd')

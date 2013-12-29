@@ -55,30 +55,56 @@ compare_bool = {
     '!=' : lc.ICMP_NE
 }
 
+
+def create_constant(typ, value):
+    """
+    Creates a constant scalar, or vector of constant scalars
+    """
+    t = typ.base if typ.is_vector else typ
+    if t.is_int:
+        const = Constant.int(type, value)
+    elif t.is_real:
+        const = Constant.real(type, value)
+    else:
+        raise "Incorrect type"
+    if type.is_vector:
+        const = Constant.vector([const] * typ.count)
+    return const
+
+
 # below based on from npm/codegen
 
 def integer_invert(builder, val):
-    return builder.xor(val, Constant.int_signextend(val.type, -1))
+    return builder.not_(val)
 
 def integer_usub(builder, val):
-    return builder.sub(Constant.int(val.type, 0), val)
+    return builder.sub(create_constant(val.type, 0), val)
 
 def integer_not(builder, value):
-    return builder.icmp(lc.ICMP_EQ, value, Constant.int(value.type, 0))
+    return builder.icmp(lc.ICMP_EQ, value, create_constant(value.type, 0))
 
 def float_usub(builder, val):
-    return builder.fsub(Constant.real(val.type, 0), val)
+    return builder.fsub(create_constant(val.type, 0), val)
 
 def float_not(builder, val):
-    return builder.fcmp(lc.FCMP_OEQ, val, Constant.real(val.type, 0))
+    return builder.fcmp(lc.FCMP_OEQ, val, create_constant(val.type, 0))
 
+# vector operations
+
+def vector_pack(builder, values):
+    return builder.ret(Constant.vector(values))
+
+def vector_fill(builder, value, count):
+    return builder.ret(Constant.vector([value] * count))
+
+# operators
 
 binop_int  = {
      '+': (lc.Builder.add, lc.Builder.add),
      '-': (lc.Builder.sub, lc.Builder.sub),
      '*': (lc.Builder.mul, lc.Builder.mul),
      '/': (lc.Builder.sdiv, lc.Builder.udiv),
-    '//': (lc.Builder.sdiv, lc.Builder.udiv),
+     '//': (lc.Builder.sdiv, lc.Builder.udiv),
      '%': (lc.Builder.srem, lc.Builder.urem),
      '&': (lc.Builder.and_, lc.Builder.and_),
      '|': (lc.Builder.or_, lc.Builder.or_),
@@ -92,7 +118,7 @@ binop_float = {
      '-': lc.Builder.fsub,
      '*': lc.Builder.fmul,
      '/': lc.Builder.fdiv,
-    '//': lc.Builder.fdiv,
+     '//': lc.Builder.fdiv,
      '%': lc.Builder.frem,
 }
 
@@ -170,16 +196,18 @@ class Translator(object):
     # __________________________________________________________________
 
     def op_unary(self, op, arg):
+        t = op.type.base if op.type.is_vector else op.type
         opmap = { Boolean: unary_bool,
                   Integral: unary_int,
-                  Real: unary_float }[type(op.type)]
+                  Real: unary_float }[type(t)]
         unop = defs.unary_opcodes[op.opcode]
         return opmap[unop](self.builder, arg)
 
     def op_binary(self, op, left, right):
+        t = op.type.base if op.type.is_vector else op.type
         binop = defs.binary_opcodes[op.opcode]
-        if op.type.is_int:
-            genop = binop_int[binop][op.type.unsigned]
+        if t.is_integral:
+            genop = binop_int[binop][t.unsigned]
         else:
             genop = binop_float[binop]
         return genop(self.builder, left, right, op.result)
@@ -187,6 +215,7 @@ class Translator(object):
     def op_compare(self, op, left, right):
         cmpop = defs.compare_opcodes[op.opcode]
         type = op.args[0].type
+        type = type.base if type.is_vector else type
         if type.is_int and type.unsigned:
             cmp, lop = self.builder.icmp, compare_unsiged_int[cmpop]
         elif type.is_int or type.is_bool:
@@ -201,12 +230,18 @@ class Translator(object):
     def op_convert(self, op, arg):
         if op.args[0].type == op.type:
             return arg
+        t = op.type.base if op.type.is_vector else op.type
         from llpython.byte_translator import LLVMCaster
-        unsigned = op.type.is_int and op.type.unsigned
-        # The float cast doens't accept this keyword argument
+        unsigned = t.is_integral and t.unsigned
+        # The float cast doesn't accept this keyword argument
         kwds = {'unsigned': unsigned} if unsigned else {}
         return LLVMCaster.build_cast(self.builder, arg,
-                                     self.llvm_type(op.type), **kwds)
+                                     self.llvm_type(t), **kwds)
+
+    def op_bitcast(self, op, val):
+        if op.args[0].type == op.type:
+            return val
+        return self.builder.bitcast(val, self.llvm_type(op.type), op.result)
 
     # __________________________________________________________________
 
@@ -279,6 +314,30 @@ class Translator(object):
 
     # __________________________________________________________________
 
+    def op_extractvalue(self, op, val, indices):
+        assert isinstance(indices, list)
+        return self.builder.extract_value(val, [i.s_ext_value for i in indices], op.result)
+
+    def op_insertvalue(self, op, val, elt, indices):
+        assert isinstance(indices, list)
+        return self.builder.insert_value(val, elt, [i.s_ext_value for i in indices], op.result)
+
+    def op_gep(self, op, ptr, indices):
+        assert isinstance(indices, list)
+        return self.builder.gep(ptr, indices)
+
+    # __________________________________________________________________
+
+    def op_extractelement(self, op, val, idx):
+        assert isinstance(idx, lc.ConstantInt)
+        return self.builder.extract_element(val, idx, op.result)
+
+    def op_insertelement(self, op, val, elt, idx):
+        assert isinstance(idx, lc.ConstantInt)
+        return self.builder.insert_element(val, elt, idx, op.result)
+
+    # __________________________________________________________________
+
     def op_getindex(self, op, array, indices):
         return self.builder.gep(array, indices, op.result)
 
@@ -288,14 +347,10 @@ class Translator(object):
 
     # __________________________________________________________________
 
-    def op_getindex(self, op, array, indices):
-        return self.builder.gep(array, indices, op.result)
-
-    # __________________________________________________________________
-
-    def op_alloca(self, op):
-        llvm_pointer_type = self.llvm_type(op.type)
-        return self.builder.alloca(llvm_pointer_type.pointee, op.result)
+    def op_alloca(self, op, numItems):
+        if numItems is not None:
+            return self.builder.alloca_array(self.llvm_type(ty), numItems, op.result)
+        return self.builder.alloca(self.llvm_type(op.type.base), op.result)
 
     def op_load(self, op, stackvar):
         return self.builder.load(stackvar, op.result)
@@ -348,7 +403,7 @@ class Translator(object):
 
     def op_ptrcast(self, op, val):
         ltype = self.llvm_type(op.type)
-        if op.type.is_int:
+        if op.type.is_integral:
             return self.builder.ptrtoint(val, ltype)
         else:
             return self.builder.bitcast(val, ltype, op.result)
