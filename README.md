@@ -52,8 +52,8 @@ pykit is inspired by VMKit and LLVM.
 
 Website
 =======
-http://pykit.github.io/pykit/
+<strike>http://pykit.github.io/pykit/</strike>
 
 Documentation
 =============
-http://pykit.github.io/pykit-doc/
+<strike>http://pykit.github.io/pykit-doc/</strike>
